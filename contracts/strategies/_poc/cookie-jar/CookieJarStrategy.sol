@@ -14,25 +14,28 @@ import {Metadata} from "../../../core/libraries/Metadata.sol";
 contract CookieJarStrategy is BaseStrategy, ReentrancyGuard {
 
     struct InitializeData {
-        bool registryGating;
         bool metadataRequired;
-        bool grantAmountRequired;
+        uint256 distributionInterval; // Allocated Recipients can take funds from the jar each distributionInterval number of days
     }
 
     struct Recipient {
-        bool useRegistryAnchor;
         address recipientAddress;
+        uint256 totalDelieverables; // proo
         uint256 grantAmount;
         Metadata metadata;
         Status recipientStatus;
-        Status milestonesReviewStatus;
+        uint256 applicationId;
+        uint256 totalVotesReceived;
     }
 
-    bool public registryGating;
     bool public metadataRequired;
-    bool public grantAmountRequired;
+    uint256 public distributionInterval;
     IRegistry private _registry;
     mapping(address => Recipient) private _recipients;
+
+    event UpdatedRegistration(
+        address indexed recipientId, uint256 applicationId, bytes data, address sender, Status status
+    );
 
 
     constructor(address _allo, string memory _name) BaseStrategy(_allo, _name) {}
@@ -48,13 +51,11 @@ contract CookieJarStrategy is BaseStrategy, ReentrancyGuard {
         __BaseStrategy_init(_poolId);
 
         // Set the strategy specific variables
-        registryGating = _initData.registryGating;
         metadataRequired = _initData.metadataRequired;
-        grantAmountRequired = _initData.grantAmountRequired;
+        distributionInterval = _initData.distributionInterval;
         _registry = allo.getRegistry();
 
         // Set the pool to active - this is required for the strategy to work and distribute funds
-        // NOTE: There may be some cases where you may want to not set this here, but will be strategy specific
         _setPoolActive(true);
     }
 
@@ -72,9 +73,44 @@ contract CookieJarStrategy is BaseStrategy, ReentrancyGuard {
         onlyActivePool
         returns (address recipientId)
     {
+        address recipientAddress;
+        Metadata memory metadata;
 
-        // Emit event for the registration
-        emit Registered(recipientId, _data, _sender);
+        (recipientAddress, metadata) = abi.decode(_data, (address, Metadata));
+
+        // make sure that if metadata is required, it is provided
+        if (metadataRequired && (bytes(metadata.pointer).length == 0 || metadata.protocol == 0)) {
+            revert INVALID_METADATA();
+        }
+
+        // make sure the recipient address is not the zero address
+        if (recipientAddress == address(0)) revert RECIPIENT_ERROR(recipientId);
+
+        Recipient storage recipient = _recipients[recipientId];
+
+        // update the recipients data
+        recipient.recipientAddress = recipientAddress;
+        recipient.metadata = metadata;
+        ++recipient.applicationId;
+
+        Status currentStatus = recipient.recipientStatus;
+
+        if (currentStatus == Status.None) {
+            // recipient registering new application
+            recipient.recipientStatus = Status.Pending;
+            emit Registered(recipientId, _data, _sender);
+        } else {
+            // recipient updating rejected/pending/appealed/accepted application
+            if (currentStatus == Status.Rejected) {
+                recipient.recipientStatus = Status.Appealed;
+            } else if (currentStatus == Status.Accepted) {
+                // recipient updating already accepted application
+                recipient.recipientStatus = Status.Pending;
+            }
+
+            // emit the new status with the '_data' that was passed in
+            emit UpdatedRegistration(recipientId, recipient.applicationId, _data, _sender, recipient.recipientStatus);
+        }
     }
 
     function _allocate(bytes memory _data, address _sender)
